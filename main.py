@@ -3,6 +3,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 import yt_dlp
 import os
+import asyncio
 
 load_dotenv()
 
@@ -15,7 +16,11 @@ ytdl_opts = {
     'format': 'bestaudio[abr<=96]/bestaudio',
     'noplaylist': True,
     'quiet': True,
-    'no_warnings': True
+    'no_warnings': True,
+    'postprocessors': [{
+        'key': 'FFmpegExtractAudio',
+        'preferredcodec': 'libopus',
+    }]
 }
 
 queues = {}
@@ -24,8 +29,8 @@ queues = {}
 async def on_ready():
     print(f'{bot.user} is online!')
     try:
-        await bot.tree.sync()
-        print("Slash commands synced!")
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} command(s)")
     except Exception as e:
         print(f"Error syncing: {e}")
 
@@ -34,14 +39,27 @@ async def play(interaction: discord.Interaction, search: str):
     if not interaction.user.voice:
         return await interaction.response.send_message("Kamu harus di VC!", ephemeral=True)
 
-    await interaction.response.defer()
-
     voice_client = interaction.guild.voice_client
 
+    # Perbaikan: Jika error sebelumnya, diskoneksi dulu
+    if voice_client:
+        if voice_client.is_connected() and voice_client.channel != interaction.user.voice.channel:
+            try:
+                await voice_client.move_to(interaction.user.voice.channel)
+            except:
+                await voice_client.disconnect(force=True)
+                voice_client = None
+        elif not voice_client.is_connected():
+            voice_client = None
+
     if not voice_client:
-        voice_client = await interaction.user.voice.channel.connect()
-    elif voice_client.channel != interaction.user.voice.channel:
-        await voice_client.move_to(interaction.user.voice.channel)
+        try:
+            voice_client = await interaction.user.voice.channel.connect()
+        except Exception as e:
+            print(f"Error connecting to VC: {e}")
+            return await interaction.followup.send("❌ Gagal masuk VC. Coba lagi.", ephemeral=True)
+
+    await interaction.response.defer()
 
     try:
         with yt_dlp.YoutubeDL(ytdl_opts) as ydl:
@@ -49,7 +67,11 @@ async def play(interaction: discord.Interaction, search: str):
             url = info['url']
             title = info.get('title', 'Unknown')
 
-        ffmpeg_options = {'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5', 'options': '-vn'}
+        # Gunakan FFmpeg standalone yang lebih stabil
+        ffmpeg_options = {
+            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+            'options': '-vn'
+        }
         source = discord.FFmpegOpusAudio(url, **ffmpeg_options)
 
         voice_client.play(source, after=lambda e: print(f'Finished playing: {title}'))
@@ -69,7 +91,6 @@ async def stop(interaction: discord.Interaction):
 
 @bot.tree.command(name="skip", description="Skip lagu")
 async def skip(interaction: discord.Interaction):
-    # Simple skip: disconnect then reconnect (opsional, atau biarkan user manual stop dulu)
     if interaction.guild.voice_client:
         interaction.guild.voice_client.stop()
         await interaction.response.send_message("Skipped!")
